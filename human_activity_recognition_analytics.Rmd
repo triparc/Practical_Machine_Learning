@@ -1,0 +1,175 @@
+---
+title: "HAR_Analytics"
+author: "Rama Tripathy"
+date: "May 20, 2017"
+output: html_document
+---
+
+## Background
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+In this project, the goal is to to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants and predict the manner in which they did the exercise. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. 
+
+### Data Preprocessing  
+1. Load libraries and setup root directory   
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache=TRUE)
+knitr::opts_knit$set(warn=-1) #surpress warnings
+library(plyr)
+library(dplyr)
+library(data.table)
+library(caret)
+library(rpart)
+library(randomForest)
+library(xgboost)
+library(ggplot2)
+library(Rtsne)
+library(corrplot)
+knitr::opts_knit$set(root.dir = "E:\\Coursera\\Practical_Machine_Learning\\")
+```
+2. Load Data   
+```{r}
+# Data sources
+trainurl <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'     # Train Data
+testurl <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'       # Test Data
+download.file(trainurl,destfile= 'train.csv', method="curl")
+download.file(testurl, destfile = 'test.csv', method="curl")
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+dim(train)
+```
+```{r}
+dim(test)
+```
+3. Select columns for belt, forearm, arm, and dumbell   
+```{r}
+target <- train$classe
+train <- select(train,  contains("arm"), contains("belt"),contains("dumbbell"))
+test <- select(test,  contains("arm"), contains("belt"),contains("dumbbell"))
+sum(is.na(train))
+```
+4. Clean data 
+There are many column having missing values. Delete columns having  NAs   
+```{r}
+nacols <- colSums(is.na(test)) == 0
+train <- train[, nacols] 
+test = test[, nacols] 
+sum(is.na(train))       # Verify if there are any other missing values
+dim(train)
+```
+5. Plot of correlation matrix between numerical variables    
+```{r}
+corMatrix <- cor(train[sapply(train, is.numeric)])
+corrplot::corrplot(corMatrix, method="number", type="upper", order="hclust")  
+```
+
+6. t-SNE plot   
+t-Distributed Stochastic Neighbor Embedding (t-SNE) is a (prize-winning) technique for dimensionality reduction that is particularly well suited for the visualization of high-dimensional datasets into low dimensional plot. We will use multidimensional reduction into 2D plane.   
+```{r}
+tsne = Rtsne(as.matrix(train), check_duplicates=FALSE, pca=TRUE, 
+              perplexity=40, theta=0.5, dims=2)
+tsn_embedding = as.data.frame(tsne$Y)
+tsn_embedding$Class = target
+g = ggplot(tsn_embedding, aes(V1, V2, color=Class)) +
+  geom_point() + xlab("") + ylab("") +
+  ggtitle("t-SNE Embedding of 'Classe' Outcomes") +
+  theme(plot.title = element_text(lineheight=.8,hjust = 0.5))
+print(g)
+```
+
+In the tSNE plot there is no clear separation of clustering of the 5 levels of Classe outcomes. NOTHING TO SEE HERE! MOVE ON to BUILD PREDICTIVE MODELS.   
+
+### Build xgb Models  
+1. Converte data into xgb format for xgboost model   
+```{r}
+y = as.matrix(as.integer(target)-1)
+dtrain <- xgb.DMatrix(data=as.matrix(train), label=y)
+dtest <- xgb.DMatrix(data=as.matrix(test))
+```
+2. Setup Paramaeters for CV training   
+We will use a 5-fold cross validation with 1000 epochs to achieve the error rate of less than 0.1% for a good classification.  
+```{r}
+param <- list(booster="gbtree",            # tree based boosting
+              objective="multi:softprob",  # multiclass classification 
+              eval_metric="mlogloss",      # evaluation metric 
+              nthread=13,                  # number of threads to be used 
+              num_class=5,                 # number of classes
+              eta = .03,                   # step size shrinkage 
+              gamma = 1,                   # minimum loss reduction
+              max_depth = 4,               # maximum depth of tree 
+              min_child_weight = 4,        # minimum sum of instance weight needed in a child
+              subsample = .7,              # part of data instances to grow tree 
+              colsample_bytree = .5        # subsample ratio of columns when constructing each tree
+)
+```
+3. Estimate number of iteration needed and elapsed time to achieve the minimum error rate  
+```{r}
+set.seed(1230)
+tme <- Sys.time()
+xgb2cv <- xgb.cv(data = dtrain,
+                 params = param,
+                 nrounds = 1000,
+                 maximize=FALSE,
+                 prediction = TRUE,
+                 nfold = 5,
+                 print_every_n = 200,
+                 early_stopping_round=200)
+elapsedtme <- Sys.time() - tme
+```
+The elapsed time for 1000 iterations is: `r elapsedtme` and the mlogloss error is: 0.044162+0.001500   
+6. Fit the XGBoost gradient boosting model on all of the training data   
+```{r}
+bst <-  xgb.train(data = dtrain,
+                  params = param,
+                  nrounds = xgb2cv$best_ntreelimit
+)
+```
+7. Calculate mlogloss error for the training data   
+```{r}
+logLoss = function(pred, actual){
+  predsums <- 0
+  for (i in 1:ncol(pred)){
+    predsums <- predsums -1*mean(log(pred[model.matrix(~ actual + 0) - pred[,i] > 0, i]))
+  }
+  predsums
+}
+minmax <- function (x) {
+  min(max(x, 1E-15), 1-1E-15)
+}
+pred <- predict(bst, dtrain)
+pred <- t(matrix(pred, nrow=5, ncol=nrow(dtrain)))
+pred.val <- max.col(pred, "last")
+pred = as.data.table(pred)
+pred <- mutate_all(pred, minmax)
+ll <- logLoss(pred, y)
+```
+The Error achieved: `r ll` logloss error   
+
+### Prediction Results   
+1. Calculation of confusion matrix   
+```{r}
+confusionMatrix(factor(y+1), factor(pred.val))
+```
+The average accuracy is 99.94%, with error rate of 0.06%. So, expected error rate of less than 0.1% is fulfilled.   
+
+2. Predict the test data    
+```{r}
+tPreds <- t(matrix(predict(bst, dtest), nrow=5, ncol=nrow(dtest)))
+pred.val <- max.col(tPreds, "last")
+classe.val <- toupper(letters[pred.val])
+fwrite(data.table(problem_id = rownames(test), classe.val),
+       "E:\\Coursera\\Practical_Machine_Learning\\output\\answer.csv")
+```
+3. identify Important Features   
+```{r}
+model <- xgb.dump(bst, with_stats=TRUE)
+names <- names(train)
+importance_matrix <- xgb.importance(names, model=bst)
+gg <- xgb.ggplot.importance(importance_matrix, measure = "Frequency", rel_to_first = TRUE)
+gg + ggplot2::ylab("Frequency")
+```
+
+
+
+
