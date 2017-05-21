@@ -2,7 +2,9 @@
 title: "HAR_Analytics"
 author: "Rama Tripathy"
 date: "May 20, 2017"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 
 ## Background
@@ -26,6 +28,7 @@ library(xgboost)
 library(ggplot2)
 library(Rtsne)
 library(corrplot)
+knitr::opts_knit$set(root.dir = "E:\\Coursera\\Practical_Machine_Learning\\")
 ```
 2. Load Data   
 ```{r}
@@ -158,7 +161,7 @@ tPreds <- t(matrix(predict(bst, dtest), nrow=5, ncol=nrow(dtest)))
 pred.val <- max.col(tPreds, "last")
 classe.val <- toupper(letters[pred.val])
 fwrite(data.table(problem_id = rownames(test), classe.val),
-       "answer.csv")
+       "E:\\Coursera\\Practical_Machine_Learning\\output\\answer.csv")
 ```
 3. identify Important Features   
 ```{r}
